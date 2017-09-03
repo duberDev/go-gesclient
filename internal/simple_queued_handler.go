@@ -2,6 +2,7 @@ package internal
 
 import (
 	"fmt"
+	log "github.com/jdextraze/go-gesclient/logger"
 	"reflect"
 	"sync/atomic"
 )

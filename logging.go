@@ -1,17 +1,18 @@
 package gesclient
 
-import "github.com/op/go-logging"
+import (
+	"github.com/op/go-logging"
+	"os"
+)
+
+var formatter = logging.MustStringFormatter("%{time:2006-01-02T15:04:05.999999} - %{level} - %{message}")
 
 func init() {
+	logging.SetBackend(logging.NewLogBackend(os.Stderr, "", 0))
+	logging.SetFormatter(formatter)
 	logging.SetLevel(logging.ERROR, "gesclient")
-	logging.SetLevel(logging.ERROR, "internal")
-	logging.SetLevel(logging.ERROR, "operations")
-	logging.SetLevel(logging.ERROR, "client")
 }
 
 func Debug() {
 	logging.SetLevel(logging.DEBUG, "gesclient")
-	logging.SetLevel(logging.DEBUG, "internal")
-	logging.SetLevel(logging.DEBUG, "operations")
-	logging.SetLevel(logging.DEBUG, "client")
 }

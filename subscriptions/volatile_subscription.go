@@ -37,7 +37,7 @@ func (s *VolatileSubscription) createSubscriptionPackage() (*client.Package, err
 	if err != nil {
 		return nil, err
 	}
-	var flags byte
+	var flags client.TcpFlag
 	if s.userCredentials != nil {
 		flags = client.FlagsAuthenticated
 	}
@@ -71,7 +71,7 @@ func (s *VolatileSubscription) inspectPackage(p *client.Package) (bool, *client.
 }
 
 func (s *VolatileSubscription) createSubscriptionObject(lastCommitPosition int64, lastEventNumber *int,
-) (*client.EventStoreSubscription, error) {
-	subscription := NewVolatileEventStoreSubscription(s, s.streamId, lastCommitPosition, lastEventNumber)
-	return subscription.EventStoreSubscription, nil
+) (interface{}, client.EventStoreSubscription, error) {
+	obj := NewVolatileEventStoreSubscription(s, s.streamId, lastCommitPosition, lastEventNumber)
+	return obj, obj.EventStoreSubscription, nil
 }

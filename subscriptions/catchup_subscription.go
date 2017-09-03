@@ -3,10 +3,12 @@ package subscriptions
 import (
 	"errors"
 	"github.com/jdextraze/go-gesclient/client"
+	log "github.com/jdextraze/go-gesclient/logger"
 	"github.com/jdextraze/go-gesclient/tasks"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 var dropSubscriptionEvent = client.NewResolvedEvent(nil)
@@ -15,6 +17,8 @@ type dropData struct {
 	reason client.SubscriptionDropReason
 	err    error
 }
+
+var nilDropReason *dropData = &dropData{client.SubscriptionDropReason_Unknown, nil}
 
 type ReadEventsTillAsyncHandler func(connection client.Connection, resolveLinkTos bool,
 	userCredentials *client.UserCredentials, lastCommitPosition *int64, lastEventNumber *int32) *tasks.Task
@@ -33,7 +37,7 @@ type catchUpSubscription struct {
 	subscriptionDropped   client.CatchUpSubscriptionDroppedHandler
 	verbose               bool
 	liveQueue             chan *client.ResolvedEvent
-	subscription          *client.EventStoreSubscription
+	subscription          client.EventStoreSubscription
 	dropData              *dropData
 	allowProcessing       bool
 	isProcessing          int32
@@ -76,6 +80,7 @@ func newCatchUpSubscription(
 		stopped:               &sync.WaitGroup{},
 		readEventsTillAsync:   readEventsTillAsync,
 		tryProcess:            tryProcess,
+		dropData:              nilDropReason,
 	}
 }
 
@@ -85,7 +90,7 @@ func (s *catchUpSubscription) StreamId() string { return s.streamId }
 
 func (s *catchUpSubscription) Start() *tasks.Task {
 	if s.verbose {
-		log.Debugf("Catch-up Subscription to %s: starting...", s.streamId)
+		s.debug("starting...")
 	}
 	return s.runSubscription()
 }
@@ -95,8 +100,8 @@ func (s *catchUpSubscription) Stop(timeout ...time.Duration) (err error) {
 		panic("invalid number of arguments")
 	}
 	if s.verbose {
-		log.Debugf("Catch-up Subscription to %s: requesting stop...", s.streamId)
-		log.Debugf("Catch-up Subscription to %s: unhooking from connection.Connected.", s.streamId)
+		s.debug("requesting stop...")
+		s.debug("unhooking from connection.Connected.")
 	}
 	if err = s.connection.Connected().Remove(client.EventHandler(s.onReconnect)); err != nil {
 		return
@@ -120,8 +125,8 @@ func (s *catchUpSubscription) Stop(timeout ...time.Duration) (err error) {
 
 func (s *catchUpSubscription) onReconnect(evt client.Event) error {
 	if s.verbose {
-		log.Debugf("Catch-up Subscription to %s: recovering after reconnection.", s.streamId)
-		log.Debugf("Catch-up Subscription to %s: unhooking from connection.Connected.", s.streamId)
+		s.debug("recovering after reconnection.")
+		s.debug("unhooking from connection.Connected.")
 	}
 	if err := s.connection.Connected().Remove(client.EventHandler(s.onReconnect)); err != nil {
 		return err
@@ -131,15 +136,14 @@ func (s *catchUpSubscription) onReconnect(evt client.Event) error {
 }
 
 func (s *catchUpSubscription) runSubscription() *tasks.Task {
-	return tasks.NewStarted(tasks.TaskCallback(s.loadHistoricalEvents)).
-		ContinueWith(tasks.ContinueWithCallback(func(t *tasks.Task) error {
-			return s.handleErrorOrContinue(t, nil)
-		}))
+	return tasks.NewStarted(s.loadHistoricalEvents).ContinueWith(func(t *tasks.Task) (interface{}, error) {
+		return nil, s.handleErrorOrContinue(t, nil)
+	})
 }
 
 func (s *catchUpSubscription) loadHistoricalEvents() (interface{}, error) {
 	if s.verbose {
-		log.Debugf("Catch-up Subscription to %s: running...", s.streamId)
+		s.debug("running...")
 	}
 
 	s.stopped.Add(1)
@@ -147,12 +151,12 @@ func (s *catchUpSubscription) loadHistoricalEvents() (interface{}, error) {
 
 	if !s.shouldStop {
 		if s.verbose {
-			log.Debugf("Catch-up Subscription to %s: pulling events...", s.streamId)
+			s.debug("pulling events...")
 		}
 		s.readEventsTillAsync(s.connection, s.resolveLinkTos, s.userCredentials, nil, nil).
-			ContinueWith(tasks.ContinueWithCallback(func(t *tasks.Task) error {
-				return s.handleErrorOrContinue(t, s.subscribeToStream)
-			}))
+			ContinueWith(func(t *tasks.Task) (interface{}, error) {
+				return nil, s.handleErrorOrContinue(t, s.subscribeToStream)
+			})
 		return nil, nil
 	}
 	return nil, s.dropSubscription(client.SubscriptionDropReason_UserInitiated, nil)
@@ -161,7 +165,7 @@ func (s *catchUpSubscription) loadHistoricalEvents() (interface{}, error) {
 func (s *catchUpSubscription) subscribeToStream() (err error) {
 	if !s.shouldStop {
 		if s.verbose {
-			log.Debugf("Catch-up Subscription to %s: subscribing...", s.streamId)
+			s.debug("subscribing...")
 		}
 		var task *tasks.Task
 		if s.streamId == "" {
@@ -174,16 +178,16 @@ func (s *catchUpSubscription) subscribeToStream() (err error) {
 		if err != nil {
 			return err
 		}
-		task.ContinueWith(tasks.ContinueWithCallback(func(t *tasks.Task) error {
-			return s.handleErrorOrContinue(t, func() error {
-				s.subscription = &client.EventStoreSubscription{}
-				if err := t.Result(s.subscription); err != nil {
+		task.ContinueWith(func(t *tasks.Task) (interface{}, error) {
+			return nil, s.handleErrorOrContinue(t, func() error {
+				if err := t.Error(); err != nil {
 					return err
 				}
+				s.subscription = t.Result().(*VolatileEventStoreSubscription).EventStoreSubscription
 				s.readMissedHistoricEvents()
 				return nil
 			})
-		}))
+		})
 		return nil
 	}
 	return s.dropSubscription(client.SubscriptionDropReason_UserInitiated, nil)
@@ -192,7 +196,7 @@ func (s *catchUpSubscription) subscribeToStream() (err error) {
 func (s *catchUpSubscription) readMissedHistoricEvents() {
 	if !s.shouldStop {
 		if s.verbose {
-			log.Debugf("Catch-up Subscription to %s: pulling events (if left)...", s.streamId)
+			s.debug("pulling events (if left)...")
 		}
 		lastCommitPosition := s.subscription.LastCommitPosition()
 		var lastEventNumber *int32
@@ -203,9 +207,9 @@ func (s *catchUpSubscription) readMissedHistoricEvents() {
 			lastEventNumber = &tmp2
 		}
 		s.readEventsTillAsync(s.connection, s.resolveLinkTos, s.userCredentials, &lastCommitPosition,
-			lastEventNumber).ContinueWith(tasks.ContinueWithCallback(func(t *tasks.Task) error {
-			return s.handleErrorOrContinue(t, s.startLiveProcessing)
-		}))
+			lastEventNumber).ContinueWith(func(t *tasks.Task) (interface{}, error) {
+			return nil, s.handleErrorOrContinue(t, s.startLiveProcessing)
+		})
 		return
 	}
 	s.dropSubscription(client.SubscriptionDropReason_UserInitiated, nil)
@@ -216,13 +220,13 @@ func (s *catchUpSubscription) startLiveProcessing() error {
 		return s.dropSubscription(client.SubscriptionDropReason_UserInitiated, nil)
 	}
 	if s.verbose {
-		log.Debugf("Catch-up Subscription to %s: processing live events...", s.streamId)
+		s.debug("processing live events...")
 	}
 	if s.liveProcessingStarted != nil {
 		s.liveProcessingStarted(s)
 	}
 	if s.verbose {
-		log.Debugf("Catch-up Subscription to {0}: hooking to connection.Connected", s.streamId)
+		s.debug("hooking to connection.Connected")
 	}
 	s.connection.Connected().Add(s.onReconnect)
 	s.allowProcessing = true
@@ -231,9 +235,12 @@ func (s *catchUpSubscription) startLiveProcessing() error {
 }
 
 func (s *catchUpSubscription) enqueueSubscriptionDropNotification(reason client.SubscriptionDropReason, err error) {
-	s.liveQueue <- dropSubscriptionEvent
-	if s.allowProcessing {
-		s.ensureProcessingPushQueue()
+	dd := dropData{reason, err}
+	if atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(&s.dropData)), unsafe.Pointer(nilDropReason), unsafe.Pointer(&dd)) {
+		s.liveQueue <- dropSubscriptionEvent
+		if s.allowProcessing {
+			s.ensureProcessingPushQueue()
+		}
 	}
 }
 
@@ -249,9 +256,9 @@ func (s *catchUpSubscription) handleErrorOrContinue(t *tasks.Task, continuation 
 	return nil
 }
 
-func (s *catchUpSubscription) enqueuePushedEvent(s2 *client.EventStoreSubscription, e *client.ResolvedEvent) error {
+func (s *catchUpSubscription) enqueuePushedEvent(s2 client.EventStoreSubscription, e *client.ResolvedEvent) error {
 	if s.verbose {
-		log.Debugf("Catch-up Subscription to %s: event appeared (%s, %s, %s @ %s).", s.streamId, e.OriginalStreamId(),
+		s.debug("event appeared (%s, %s, %s @ %s).", e.OriginalStreamId(),
 			e.OriginalEventNumber(), e.OriginalEvent().EventType(), e.OriginalPosition())
 	}
 
@@ -270,7 +277,7 @@ func (s *catchUpSubscription) enqueuePushedEvent(s2 *client.EventStoreSubscripti
 }
 
 func (s *catchUpSubscription) serverSubscriptionDropped(
-	sub *client.EventStoreSubscription,
+	sub client.EventStoreSubscription,
 	reason client.SubscriptionDropReason,
 	err error,
 ) error {
@@ -289,7 +296,7 @@ func (s *catchUpSubscription) processLiveQueue() {
 		for len(s.liveQueue) > 0 {
 			e := <-s.liveQueue
 			if e == dropSubscriptionEvent {
-				if s.dropData == nil {
+				if s.dropData == nilDropReason {
 					s.dropData = &dropData{
 						reason: client.SubscriptionDropReason_Unknown,
 						err:    errors.New("Drop reason not specified"),
@@ -318,7 +325,7 @@ func (s *catchUpSubscription) dropSubscription(
 ) error {
 	if atomic.CompareAndSwapInt32(&s.isDropped, 0, 1) {
 		if s.verbose {
-			log.Debugf("Catch-up Subscription to %s: dropping subscription, reason: %s %s.", s.streamId,
+			s.debug("dropping subscription, reason: %s %s.", s.streamId,
 				reason, erro)
 		}
 		if s.subscription != nil {
@@ -334,4 +341,15 @@ func (s *catchUpSubscription) dropSubscription(
 		s.stopped.Done()
 	}
 	return nil
+}
+
+func (s *catchUpSubscription) debug(format string, args ...interface{}) {
+	arguments := make([]interface{}, len(args)+1)
+	if s.streamId == "" {
+		arguments[0] = "<all>"
+	} else {
+		arguments[0] = s.streamId
+	}
+	copy(arguments[1:], args)
+	log.Debugf("Catch-up Subscription to %s: "+format, arguments...)
 }

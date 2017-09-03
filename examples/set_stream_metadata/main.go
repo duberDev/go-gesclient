@@ -7,21 +7,20 @@ import (
 	"log"
 	"net"
 	"net/url"
-	"os"
-	"os/signal"
 	"strings"
-	"time"
 )
 
 func main() {
 	var debug bool
 	var addr string
 	var stream string
+	var metadata string
 	var verbose bool
 
 	flag.BoolVar(&debug, "debug", false, "Debug")
 	flag.StringVar(&addr, "endpoint", "tcp://127.0.0.1:1113", "EventStore address")
 	flag.StringVar(&stream, "stream", "Default", "Stream ID")
+	flag.StringVar(&metadata, "metadata", "", "Metadata")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose logging (Requires debug)")
 	flag.Parse()
 
@@ -34,25 +33,21 @@ func main() {
 		log.Fatalf("Error connecting: %v", err)
 	}
 
-	task, err := c.SubscribeToStreamAsync(stream, true, eventAppeared, subscriptionDropped, nil)
+	data, err := client.StreamMetadataFromJsonBytes([]byte(metadata))
 	if err != nil {
-		log.Printf("Error occured while subscribing to stream: %v", err)
-	} else if err := task.Error(); err != nil {
-		log.Printf("Error occured while waiting for result of subscribing to stream: %v", err)
+		log.Fatalf("Invalid metadata: %v", err)
+	}
+
+	if t, err := c.SetStreamMetadataAsync(stream, client.ExpectedVersion_Any, data, nil); err != nil {
+		log.Fatalf("Failed getting stream metadata: %v", err)
+	} else if err := t.Error(); err != nil {
+		log.Fatalf("Failed getting stream metadata result: %v", err)
 	} else {
-		sub := task.Result().(client.EventStoreSubscription)
-		log.Printf("SubscribeToStream result: %v", sub)
-
-		ch := make(chan os.Signal, 1)
-		signal.Notify(ch, os.Interrupt)
-		<-ch
-
-		sub.Close()
-		time.Sleep(10 * time.Millisecond)
+		result := t.Result().(*client.WriteResult)
+		log.Printf("result: %v", result)
 	}
 
 	c.Close()
-	time.Sleep(10 * time.Millisecond)
 }
 
 func getConnection(addr string, verbose bool) client.Connection {
@@ -100,14 +95,4 @@ func getConnection(addr string, verbose bool) client.Connection {
 	c.AuthenticationFailed().Add(func(evt client.Event) error { log.Printf("Auth failed: %v", evt); return nil })
 
 	return c
-}
-
-func eventAppeared(s client.EventStoreSubscription, e *client.ResolvedEvent) error {
-	log.Printf("event appeared: %d | %s", e.OriginalEventNumber(), string(e.Event().Data()))
-	return nil
-}
-
-func subscriptionDropped(s client.EventStoreSubscription, r client.SubscriptionDropReason, err error) error {
-	log.Printf("subscription dropped: %s, %v", r, err)
-	return nil
 }

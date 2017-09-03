@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/golang/protobuf/proto"
 	"github.com/jdextraze/go-gesclient/client"
+	log "github.com/jdextraze/go-gesclient/logger"
 	"github.com/jdextraze/go-gesclient/messages"
 	"github.com/jdextraze/go-gesclient/tasks"
 	"github.com/satori/go.uuid"
@@ -57,7 +58,7 @@ func newBaseOperation(
 }
 
 func (o *baseOperation) CreateNetworkPackage(correlationId uuid.UUID) (*client.Package, error) {
-	var flags byte
+	var flags client.TcpFlag
 	if o.userCredentials != nil {
 		flags = client.FlagsAuthenticated
 	}
@@ -152,11 +153,17 @@ func (o *baseOperation) inspectNotHandled(p *client.Package) (*client.Inspection
 		}
 		var tcpEndpoint *net.TCPAddr
 		var secureTcpEndpoint *net.TCPAddr
-		tcpEndpoint, err = net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", masterInfo.ExternalTcpAddress,
-			masterInfo.ExternalTcpPort))
+		tcpEndpoint, err = net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", masterInfo.GetExternalTcpAddress(),
+			masterInfo.GetExternalTcpPort()))
+		if err != nil {
+			break
+		}
 		secureTcpEndpoint, err = net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d",
-			masterInfo.ExternalSecureTcpAddress, masterInfo.ExternalSecureTcpPort))
-		return client.NewInspectionResult(client.InspectionDecision_Retry, "NotHandled - NotMaster",
+			masterInfo.GetExternalSecureTcpAddress(), masterInfo.GetExternalSecureTcpPort()))
+		if err != nil {
+			break
+		}
+		return client.NewInspectionResult(client.InspectionDecision_Reconnect, "NotHandled - NotMaster",
 			tcpEndpoint, secureTcpEndpoint), nil
 	default:
 		log.Errorf("Unknown NotHandledReason: %s", dto.Reason)

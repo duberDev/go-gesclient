@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/jdextraze/go-gesclient/client"
+	log "github.com/jdextraze/go-gesclient/logger"
 	"github.com/jdextraze/go-gesclient/subscriptions"
 	"github.com/jdextraze/go-gesclient/tasks"
 	"github.com/satori/go.uuid"
@@ -205,7 +206,7 @@ func (h *connectionLogicHandler) discoverEndpoint(task *tasks.CompletionSource) 
 	if h.connection != nil {
 		remoteEndpoint = h.connection.RemoteEndpoint()
 	}
-	h.endpointDiscoverer.DiscoverAsync(remoteEndpoint).ContinueWith(func(t *tasks.Task) error {
+	h.endpointDiscoverer.DiscoverAsync(remoteEndpoint).ContinueWith(func(t *tasks.Task) (interface{}, error) {
 		if t.IsFaulted() {
 			h.EnqueueMessage(newCloseConnectionMessage(
 				"Failed to resolve TCP end point to which to connect.",
@@ -215,16 +216,16 @@ func (h *connectionLogicHandler) discoverEndpoint(task *tasks.CompletionSource) 
 				task.SetError(fmt.Errorf("Cannot resolve target endpoint"))
 			}
 		} else {
-			nodeEndpoints := &NodeEndpoints{}
-			if err := t.Result(nodeEndpoints); err != nil {
-				return err
+			if err := t.Error(); err != nil {
+				return nil, err
 			}
+			nodeEndpoints := t.Result().(*NodeEndpoints)
 			h.EnqueueMessage(newEstablishTcpConnectionMessage(nodeEndpoints))
 			if task != nil {
 				task.SetResult(nil)
 			}
 		}
-		return nil
+		return nil, nil
 	})
 }
 
@@ -397,7 +398,7 @@ func (h *connectionLogicHandler) tcpConnectionEstablished(msg message) error {
 		h.authInfo = authInfo{uuid.NewV4(), h.elapsedTime()}
 		h.connection.EnqueueSend(client.NewTcpPackage(
 			client.Command_Authenticate,
-			1,
+			client.FlagsAuthenticated,
 			h.authInfo.CorrelationId,
 			nil,
 			h.settings.DefaultUserCredentials,
@@ -586,7 +587,7 @@ func (h *connectionLogicHandler) reconnectTo(endpoints *NodeEndpoints) {
 
 	h.state = connectionState_Connecting
 	h.connectingPhase = connectingPhase_EndpointDiscovery
-	h.establishTcpConnection(endpoints)
+	h.establishTcpConnection(&establishTcpConnectionMessage{endpoints})
 }
 
 func (h *connectionLogicHandler) timerTick(msg message) error {

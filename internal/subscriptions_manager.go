@@ -3,6 +3,7 @@ package internal
 import (
 	"fmt"
 	"github.com/jdextraze/go-gesclient/client"
+	log "github.com/jdextraze/go-gesclient/logger"
 	"github.com/satori/go.uuid"
 	"time"
 )

@@ -2,19 +2,18 @@ package tasks
 
 import (
 	"errors"
-	"reflect"
 	"sync"
 	"sync/atomic"
 )
 
 type TaskCallback func() (interface{}, error)
-type ContinueWithCallback func(*Task) error
+type ContinueWithCallback func(*Task) (interface{}, error)
 
 type Task struct {
 	fn        TaskCallback
 	result    interface{}
 	err       error
-	running   int32
+	started   int32
 	completed int32
 	waitGroup *sync.WaitGroup
 }
@@ -32,18 +31,13 @@ func NewStarted(cb TaskCallback) *Task {
 	return t
 }
 
-func (t *Task) Result(res interface{}) error {
-	t.Start()
+func (t *Task) Result() interface{} {
 	t.Wait()
-	result := reflect.ValueOf(t.result)
-	if result.IsValid() && !result.IsNil() {
-		reflect.ValueOf(res).Elem().Set(result.Elem())
-	}
-	return t.err
+	return t.result
 }
 
 func (t *Task) Error() error {
-	return t.err
+	return t.Wait()
 }
 
 func (t *Task) IsCompleted() bool {
@@ -57,12 +51,12 @@ func (t *Task) IsFaulted() bool {
 func (t *Task) ContinueWith(cb ContinueWithCallback) *Task {
 	return NewStarted(func() (interface{}, error) {
 		t.Wait()
-		return nil, cb(t)
+		return cb(t)
 	})
 }
 
 func (t *Task) Start() error {
-	if atomic.CompareAndSwapInt32(&t.running, 0, 1) {
+	if atomic.CompareAndSwapInt32(&t.started, 0, 1) {
 		t.waitGroup.Add(1)
 		go func() {
 			t.result, t.err = t.fn()
@@ -75,6 +69,7 @@ func (t *Task) Start() error {
 }
 
 func (t *Task) Wait() error {
+	t.Start()
 	t.waitGroup.Wait()
 	return t.err
 }

@@ -7,10 +7,7 @@ import (
 	"log"
 	"net"
 	"net/url"
-	"os"
-	"os/signal"
 	"strings"
-	"time"
 )
 
 func main() {
@@ -34,25 +31,17 @@ func main() {
 		log.Fatalf("Error connecting: %v", err)
 	}
 
-	task, err := c.SubscribeToStreamAsync(stream, true, eventAppeared, subscriptionDropped, nil)
-	if err != nil {
-		log.Printf("Error occured while subscribing to stream: %v", err)
-	} else if err := task.Error(); err != nil {
-		log.Printf("Error occured while waiting for result of subscribing to stream: %v", err)
+	if t, err := c.GetStreamMetadataAsync(stream, nil); err != nil {
+		log.Fatalf("Failed getting stream metadata: %v", err)
+	} else if err := t.Error(); err != nil {
+		log.Fatalf("Failed getting stream metadata result: %v", err)
 	} else {
-		sub := task.Result().(client.EventStoreSubscription)
-		log.Printf("SubscribeToStream result: %v", sub)
-
-		ch := make(chan os.Signal, 1)
-		signal.Notify(ch, os.Interrupt)
-		<-ch
-
-		sub.Close()
-		time.Sleep(10 * time.Millisecond)
+		result := t.Result().(*client.StreamMetadataResult)
+		metadata, _ := result.StreamMetadata().MarshalJSON()
+		log.Printf("metadata: %v | %v", result, string(metadata))
 	}
 
 	c.Close()
-	time.Sleep(10 * time.Millisecond)
 }
 
 func getConnection(addr string, verbose bool) client.Connection {
@@ -100,14 +89,4 @@ func getConnection(addr string, verbose bool) client.Connection {
 	c.AuthenticationFailed().Add(func(evt client.Event) error { log.Printf("Auth failed: %v", evt); return nil })
 
 	return c
-}
-
-func eventAppeared(s client.EventStoreSubscription, e *client.ResolvedEvent) error {
-	log.Printf("event appeared: %d | %s", e.OriginalEventNumber(), string(e.Event().Data()))
-	return nil
-}
-
-func subscriptionDropped(s client.EventStoreSubscription, r client.SubscriptionDropReason, err error) error {
-	log.Printf("subscription dropped: %s, %v", r, err)
-	return nil
 }
